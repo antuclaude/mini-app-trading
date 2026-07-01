@@ -1,0 +1,6 @@
+streamlit
+pandas
+numpy
+tradingview-datafeed
+twelvedata  
+requests 
