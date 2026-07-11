@@ -12,7 +12,26 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 # ============================================================
 TELEGRAM_TOKEN   = "8873625903:AAFHvX06xuG3x47GSth0vh2pNhCAjCJFWBw"
 TELEGRAM_CHAT_ID = "8987704660"
-TWELVE_DATA_KEY  = "f8e1e5fb2ab1458ea907eead7c0fa09f"
+
+# 3 API key luân phiên — mỗi key 800 credits/ngày = 2400 tổng
+TWELVE_DATA_KEYS = [
+    "f8e1e5fb2ab1458ea907eead7c0fa09f",
+    "bd8755ac083548ecb2fc0fa59d6c91b8",
+    "0e2cef39a9394c83a9986cd167c0ef8e"
+]
+_key_index = [0]  # dùng list để có thể thay đổi trong hàm con
+
+def lay_key_hien_tai():
+    return TWELVE_DATA_KEYS[_key_index[0]]
+
+def chuyen_key_tiep_theo():
+    """Chuyển sang key tiếp theo, trả về True nếu còn key, False nếu hết"""
+    _key_index[0] += 1
+    if _key_index[0] >= len(TWELVE_DATA_KEYS):
+        _key_index[0] = 0  # reset về key đầu khi qua ngày mới
+        return False
+    logging.info(f"[API] Chuyển sang key {_key_index[0]+1}/{len(TWELVE_DATA_KEYS)}")
+    return True
 
 # ============================================================
 # TELEGRAM
@@ -28,59 +47,60 @@ def gui_telegram(tin_nhan):
         return False
 
 # ============================================================
-# TẦNG 1: LẤY DỮ LIỆU — CÓ RETRY + LOG RÕ LÝ DO LỖI
+# TẦNG 1: LẤY DỮ LIỆU — LUÂN PHIÊN KEY + RETRY
 # ============================================================
-def lay_du_lieu(san_pham, so_lan_thu=3, cho_giua_lan=10):
-    """
-    Thử lấy dữ liệu tối đa so_lan_thu lần.
-    Trả về (df_m15, df_h1, loi_message)
-    loi_message = None nếu thành công
-    """
+def lay_du_lieu(san_pham):
     symbol = "XAU/USD" if san_pham == "Vàng (Gold)" else "BTC/USD"
-
-    for lan in range(1, so_lan_thu + 1):
+    
+    # Thử từng key
+    for attempt in range(len(TWELVE_DATA_KEYS)):
+        key = lay_key_hien_tai()
+        logging.info(f"[API] Dùng key {_key_index[0]+1}/{len(TWELVE_DATA_KEYS)}")
+        
         try:
-            logging.info(f"[Dữ liệu] Lần thử {lan}/{so_lan_thu} — {symbol}")
-            td = TDClient(apikey=TWELVE_DATA_KEY)
+            td     = TDClient(apikey=key)
+            df_m15 = td.time_series(symbol=symbol, interval="15min", outputsize=100).as_pandas()
+            df_h1  = td.time_series(symbol=symbol, interval="1h",    outputsize=50).as_pandas()
 
-            df_m15 = td.time_series(symbol=symbol, interval="15min", outputsize=200).as_pandas()
-            df_h1  = td.time_series(symbol=symbol, interval="1h",    outputsize=100).as_pandas()
-
-            # Kiểm tra dữ liệu có hợp lệ không
             if df_m15 is None or df_m15.empty:
-                raise ValueError("df_m15 rỗng — Twelve Data không trả về dữ liệu")
+                raise ValueError("df_m15 rỗng")
             if df_h1 is None or df_h1.empty:
-                raise ValueError("df_h1 rỗng — Twelve Data không trả về dữ liệu")
+                raise ValueError("df_h1 rỗng")
 
-            # Chuẩn hóa cột
+            # Chuẩn hóa
             for df in [df_m15, df_h1]:
                 df.columns = [c.lower() for c in df.columns]
-                for col in ['open', 'high', 'low', 'close']:
-                    if col not in df.columns:
-                        raise ValueError(f"Thiếu cột '{col}' trong dữ liệu")
+                for col in ['open','high','low','close']:
                     df[col] = pd.to_numeric(df[col], errors='coerce')
 
             df_m15 = df_m15.sort_index()
             df_h1  = df_h1.sort_index()
 
-            # Kiểm tra NaN quá nhiều
-            if df_m15['close'].isna().sum() > 10:
-                raise ValueError("Dữ liệu M15 có quá nhiều giá trị NaN")
-
-            logging.info(f"[Dữ liệu] ✅ Lấy thành công — M15: {len(df_m15)} nến | H1: {len(df_h1)} nến")
+            logging.info(f"[API] ✅ Thành công — M15: {len(df_m15)} nến | H1: {len(df_h1)} nến")
             return df_m15, df_h1, None
 
         except Exception as e:
             loi = str(e)
-            logging.warning(f"[Dữ liệu] ❌ Lần {lan} thất bại: {loi}")
-            if lan < so_lan_thu:
-                logging.info(f"[Dữ liệu] Chờ {cho_giua_lan}s rồi thử lại...")
-                time.sleep(cho_giua_lan)
+            # Nếu lỗi 429 (hết quota) → chuyển key tiếp
+            if "429" in loi or "credits" in loi.lower():
+                logging.warning(f"[API] Key {_key_index[0]+1} hết quota → chuyển key tiếp")
+                con_key = chuyen_key_tiep_theo()
+                if not con_key:
+                    # Hết tất cả key trong ngày
+                    loi_cuoi = "❌ Tất cả 3 API key đã hết quota hôm nay. Reset lúc 00:00 UTC."
+                    logging.error(f"[API] {loi_cuoi}")
+                    gui_telegram(
+                        f"⚠️ <b>Hết quota tất cả API key!</b>\n"
+                        f"{loi_cuoi}\n"
+                        f"🕐 Scanner sẽ tự hoạt động lại sau 00:00 UTC"
+                    )
+                    return None, None, loi_cuoi
+            else:
+                # Lỗi khác (mạng, timeout...) → thử lại sau 10s
+                logging.warning(f"[API] Lỗi: {loi} — Thử lại sau 10s")
+                time.sleep(10)
 
-    # Hết số lần thử
-    loi_cuoi = f"❌ Không lấy được dữ liệu sau {so_lan_thu} lần thử. Lỗi: {loi}"
-    logging.error(f"[Dữ liệu] {loi_cuoi}")
-    gui_telegram(f"⚠️ <b>Scanner gặp lỗi dữ liệu!</b>\n{loi_cuoi}\n🕐 Sẽ thử lại lần quét tiếp theo.")
+    loi_cuoi = "Không lấy được dữ liệu sau khi thử tất cả key"
     return None, None, loi_cuoi
 
 # ============================================================
@@ -111,7 +131,7 @@ def tinh_ATR(df, period=14):
 # TẦNG 4: XU HƯỚNG H1
 # ============================================================
 def xac_dinh_xu_huong_H1(df_h1):
-    if df_h1 is None or len(df_h1) < 30:
+    if df_h1 is None or len(df_h1) < 20:
         return "SIDEWAY"
 
     highs = df_h1['high'].values
@@ -164,33 +184,26 @@ def xac_dinh_swing_XA(df, xu_huong):
         last_low    = swing_lows[-1]
         highs_after = [(i, v) for i, v in swing_highs if i > last_low[0]]
         if not highs_after: return None
-        last_high   = highs_after[-1]
-        return {"loai": "BUY", "X": last_low[1], "A": last_high[1],
-                "idx_X": last_low[0], "idx_A": last_high[0]}
-
+        return {"loai": "BUY",  "X": last_low[1],   "A": highs_after[-1][1],
+                "idx_X": last_low[0], "idx_A": highs_after[-1][0]}
     elif xu_huong == "DOWNTREND":
         last_high  = swing_highs[-1]
         lows_after = [(i, v) for i, v in swing_lows if i > last_high[0]]
         if not lows_after: return None
-        last_low   = lows_after[-1]
-        return {"loai": "SELL", "X": last_high[1], "A": last_low[1],
-                "idx_X": last_high[0], "idx_A": last_low[0]}
+        return {"loai": "SELL", "X": last_high[1],  "A": lows_after[-1][1],
+                "idx_X": last_high[0], "idx_A": lows_after[-1][0]}
     return None
 
 # ============================================================
 # TẦNG 6: GOLDEN POCKET
 # ============================================================
 def tinh_vung_golden_pocket(swing):
-    loai      = swing["loai"]
     X, A      = swing["X"], swing["A"]
     chieu_cao = abs(A - X)
-    if loai == "BUY":
-        gp_high = A - chieu_cao * 0.618
-        gp_low  = A - chieu_cao * 0.786
+    if swing["loai"] == "BUY":
+        return round(A - chieu_cao * 0.786, 2), round(A - chieu_cao * 0.618, 2)
     else:
-        gp_low  = A + chieu_cao * 0.618
-        gp_high = A + chieu_cao * 0.786
-    return round(gp_low, 2), round(gp_high, 2)
+        return round(A + chieu_cao * 0.618, 2), round(A + chieu_cao * 0.786, 2)
 
 # ============================================================
 # TẦNG 7: CHoCH M15
@@ -206,24 +219,18 @@ def xac_nhan_choch(df, loai, gp_low, gp_high):
         trong_vung = lows[-3:].min() <= (gp_high + buffer) and closes[-1] >= (gp_low - buffer)
         if not trong_vung:
             return False, f"⏳ Chờ giá về vùng GP: {gp_low} – {gp_high}"
-        nen_xanh = closes[-1] > opens[-1]
-        pha_dinh = closes[-1] > highs[-2]
         than_nen = abs(closes[-1] - opens[-1])
         bong_nen = abs(highs[-1] - lows[-1])
-        du_manh  = than_nen > bong_nen * 0.35
-        if nen_xanh and pha_dinh and du_manh:
+        if closes[-1] > opens[-1] and closes[-1] > highs[-2] and than_nen > bong_nen * 0.35:
             return True, "✅ CHoCH BUY: Nến xanh mạnh phá đỉnh nến trước trong Golden Pocket"
         return False, "⏳ Trong vùng GP nhưng chưa có nến CHoCH xác nhận"
     else:
         trong_vung = highs[-3:].max() >= (gp_low - buffer) and closes[-1] <= (gp_high + buffer)
         if not trong_vung:
             return False, f"⏳ Chờ giá lên vùng GP: {gp_low} – {gp_high}"
-        nen_do   = closes[-1] < opens[-1]
-        pha_day  = closes[-1] < lows[-2]
         than_nen = abs(closes[-1] - opens[-1])
         bong_nen = abs(highs[-1] - lows[-1])
-        du_manh  = than_nen > bong_nen * 0.35
-        if nen_do and pha_day and du_manh:
+        if closes[-1] < opens[-1] and closes[-1] < lows[-2] and than_nen > bong_nen * 0.35:
             return True, "✅ CHoCH SELL: Nến đỏ mạnh phá đáy nến trước trong Golden Pocket"
         return False, "⏳ Trong vùng GP nhưng chưa có nến CHoCH xác nhận"
 
@@ -234,10 +241,10 @@ def kiem_tra_phan_ky(df, loai, lookback=30):
     if len(df) < lookback:
         return False, "Chưa đủ dữ liệu RSI", 50.0
 
-    block  = df.tail(lookback).copy()
-    rsi    = tinh_RSI_wilder(block['close']).values
-    highs  = block['high'].values
-    lows   = block['low'].values
+    block   = df.tail(lookback).copy()
+    rsi     = tinh_RSI_wilder(block['close']).values
+    highs   = block['high'].values
+    lows    = block['low'].values
     rsi_now = rsi[-1]
 
     if np.isnan(rsi_now):
@@ -247,21 +254,17 @@ def kiem_tra_phan_ky(df, loai, lookback=30):
     n = len(rsi)
 
     if loai == "BUY":
-        for i in range(n - 15, n - 3):
+        for i in range(n-15, n-3):
             if i < 0: continue
             if lows[-1] < lows[i] and rsi[-1] > rsi[i] + 2.0 and rsi[i] <= 45:
-                co_phan_ky = True
-                break
-        if rsi_now < 30:
-            co_phan_ky = True
+                co_phan_ky = True; break
+        if rsi_now < 30: co_phan_ky = True
     else:
-        for i in range(n - 15, n - 3):
+        for i in range(n-15, n-3):
             if i < 0: continue
             if highs[-1] > highs[i] and rsi[-1] < rsi[i] - 2.0 and rsi[i] >= 55:
-                co_phan_ky = True
-                break
-        if rsi_now > 70:
-            co_phan_ky = True
+                co_phan_ky = True; break
+        if rsi_now > 70: co_phan_ky = True
 
     mo_ta = "🔥 RSI Divergence xác nhận!" if co_phan_ky else f"RSI: {round(rsi_now,1)} — Chưa có phân kỳ"
     return co_phan_ky, mo_ta, round(rsi_now, 1)
@@ -300,35 +303,29 @@ def tinh_confluence(xu_huong, trong_vung, co_choch, co_phan_ky, rsi_val, loai):
     diem, chi_tiet = 0, []
 
     if xu_huong in ["UPTREND","DOWNTREND"]:
-        diem += 1
-        chi_tiet.append(f"✅ H1 {xu_huong} — thuận chiều lớn")
+        diem += 1; chi_tiet.append(f"✅ H1 {xu_huong} — thuận chiều lớn")
     else:
         chi_tiet.append("❌ H1 Sideway — rủi ro cao")
 
     if trong_vung:
-        diem += 1
-        chi_tiet.append("✅ Giá trong Golden Pocket 61.8%–78.6%")
+        diem += 1; chi_tiet.append("✅ Giá trong Golden Pocket 61.8%–78.6%")
     else:
         chi_tiet.append("⏳ Chưa vào vùng Golden Pocket")
 
     if co_choch:
-        diem += 2
-        chi_tiet.append("✅✅ CHoCH M15 xác nhận (2 điểm)")
+        diem += 2; chi_tiet.append("✅✅ CHoCH M15 xác nhận (2 điểm)")
     else:
         chi_tiet.append("❌ Chưa có CHoCH xác nhận")
 
     if co_phan_ky:
-        diem += 1
-        chi_tiet.append(f"✅ RSI Divergence ({rsi_val})")
+        diem += 1; chi_tiet.append(f"✅ RSI Divergence ({rsi_val})")
     else:
         chi_tiet.append(f"➖ RSI {rsi_val} — chưa có phân kỳ")
 
     if loai == "BUY" and isinstance(rsi_val, float) and rsi_val < 35:
-        diem += 1
-        chi_tiet.append(f"✅ RSI quá bán ({rsi_val}) — hỗ trợ BUY")
+        diem += 1; chi_tiet.append(f"✅ RSI quá bán ({rsi_val}) — hỗ trợ BUY")
     elif loai == "SELL" and isinstance(rsi_val, float) and rsi_val > 65:
-        diem += 1
-        chi_tiet.append(f"✅ RSI quá mua ({rsi_val}) — hỗ trợ SELL")
+        diem += 1; chi_tiet.append(f"✅ RSI quá mua ({rsi_val}) — hỗ trợ SELL")
 
     if   diem >= 5: winrate, chat_luong = "80–85%", "🔥 TÍN HIỆU RẤT MẠNH"
     elif diem == 4: winrate, chat_luong = "70–75%", "💪 TÍN HIỆU MẠNH"
@@ -342,62 +339,45 @@ def tinh_confluence(xu_huong, trong_vung, co_choch, co_phan_ky, rsi_val, loai):
 # HÀM CHÍNH
 # ============================================================
 def lay_du_lieu_va_phan_tich(san_pham, khung_thoi_gian="15m"):
-    # 1. Lấy dữ liệu — có retry và log rõ lỗi
     df_m15, df_h1, loi = lay_du_lieu(san_pham)
-    if loi:
-        return {"loi": f"❌ Lỗi dữ liệu: {loi}"}
-    if df_m15 is None or df_m15.empty:
-        return {"loi": "❌ Không lấy được dữ liệu. Thử lại sau!"}
+    if loi or df_m15 is None:
+        return {"loi": loi or "❌ Không lấy được dữ liệu. Thử lại sau!"}
 
     gia_hien_tai = round(float(df_m15['close'].iloc[-1]), 2)
-    logging.info(f"[Phân tích] Giá hiện tại: ${gia_hien_tai}")
+    logging.info(f"[Phân tích] Giá: ${gia_hien_tai}")
 
-    # 2. Xu hướng H1
-    xu_huong = xac_dinh_xu_huong_H1(df_h1)
-    logging.info(f"[Phân tích] H1: {xu_huong}")
-
-    # 3. RSI M15
+    xu_huong     = xac_dinh_xu_huong_H1(df_h1)
     rsi_series   = tinh_RSI_wilder(df_m15['close'])
     rsi_hien_tai = round(float(rsi_series.iloc[-1]), 1) if not np.isnan(rsi_series.iloc[-1]) else 50.0
 
+    logging.info(f"[Phân tích] H1: {xu_huong} | RSI: {rsi_hien_tai}")
+
     if xu_huong == "SIDEWAY":
-        logging.info("[Phân tích] H1 Sideway — bỏ qua lần quét này")
         return {
-            "loi": None,
-            "gia_hien_tai": gia_hien_tai,
-            "xu_huong_h1": xu_huong,
-            "rsi": rsi_hien_tai,
+            "loi": None, "gia_hien_tai": gia_hien_tai,
+            "xu_huong_h1": xu_huong, "rsi": rsi_hien_tai,
             "trang_thai": "🔮 H1 đang Sideway — chờ xu hướng rõ ràng hơn",
-            "co_tin_hieu": False,
-            "diem_confluence": 0,
-            "winrate": "N/A",
-            "chat_luong": "❌ Không đủ điều kiện",
+            "co_tin_hieu": False, "diem_confluence": 0,
+            "winrate": "N/A", "chat_luong": "❌ Không đủ điều kiện",
             "chi_tiet_confluence": ["❌ H1 Sideway — chưa có xu hướng rõ ràng"]
         }
 
-    # 4. Fractal Swing
     swing = xac_dinh_swing_XA(df_m15, xu_huong)
     if swing is None:
-        logging.info("[Phân tích] Chưa tìm được Fractal Swing")
         return {
-            "loi": None,
-            "gia_hien_tai": gia_hien_tai,
-            "xu_huong_h1": xu_huong,
-            "rsi": rsi_hien_tai,
+            "loi": None, "gia_hien_tai": gia_hien_tai,
+            "xu_huong_h1": xu_huong, "rsi": rsi_hien_tai,
             "trang_thai": "🔮 Chưa tìm được Fractal Swing rõ ràng",
-            "co_tin_hieu": False,
-            "diem_confluence": 0,
-            "winrate": "N/A",
-            "chat_luong": "❌ Không đủ điều kiện",
+            "co_tin_hieu": False, "diem_confluence": 0,
+            "winrate": "N/A", "chat_luong": "❌ Không đủ điều kiện",
             "chi_tiet_confluence": [f"✅ H1 {xu_huong}", "❌ Chưa có Fractal Swing"]
         }
 
-    loai   = swing["loai"]
-    X, A   = swing["X"], swing["A"]
+    loai            = swing["loai"]
+    X, A            = swing["X"], swing["A"]
+    gp_low, gp_high = tinh_vung_golden_pocket(swing)
 
-    # 5-8. Phân tích
-    gp_low, gp_high         = tinh_vung_golden_pocket(swing)
-    co_choch, ly_do_choch   = xac_nhan_choch(df_m15, loai, gp_low, gp_high)
+    co_choch, ly_do_choch          = xac_nhan_choch(df_m15, loai, gp_low, gp_high)
     co_phan_ky, mo_ta_rsi, rsi_val = kiem_tra_phan_ky(df_m15, loai)
 
     closes_5 = df_m15['close'].tail(5).values
@@ -405,54 +385,38 @@ def lay_du_lieu_va_phan_tich(san_pham, khung_thoi_gian="15m"):
     highs_5  = df_m15['high'].tail(5).values
     buffer   = (gp_high - gp_low) * 0.3
 
-    if loai == "BUY":
-        trong_vung = lows_5.min() <= (gp_high + buffer) and closes_5[-1] >= (gp_low - buffer)
-    else:
-        trong_vung = highs_5.max() >= (gp_low - buffer) and closes_5[-1] <= (gp_high + buffer)
+    trong_vung = (lows_5.min() <= gp_high + buffer and closes_5[-1] >= gp_low - buffer) \
+                 if loai == "BUY" else \
+                 (highs_5.max() >= gp_low - buffer and closes_5[-1] <= gp_high + buffer)
 
-    # 9. Confluence
     diem, winrate, chat_luong, chi_tiet = tinh_confluence(
         xu_huong, trong_vung, co_choch, co_phan_ky, rsi_val, loai
     )
 
-    logging.info(f"[Phân tích] {loai} | GP: {gp_low}-{gp_high} | Trong GP: {trong_vung} | CHoCH: {co_choch} | Điểm: {diem}/5")
+    logging.info(f"[Phân tích] {loai} | GP: {gp_low}-{gp_high} | CHoCH: {co_choch} | Điểm: {diem}/5")
 
-    # 10. Quản lý lệnh
-    quan_ly     = None
     co_tin_hieu = co_choch and diem >= 3
-    if co_tin_hieu:
-        quan_ly = tinh_quan_ly_lenh(df_m15, loai, gp_low, gp_high, san_pham)
+    quan_ly     = tinh_quan_ly_lenh(df_m15, loai, gp_low, gp_high, san_pham) if co_tin_hieu else None
 
     ket_qua = {
-        "loi": None,
-        "gia_hien_tai": gia_hien_tai,
-        "xu_huong_h1": xu_huong,
-        "loai": loai,
-        "diem_X": round(X, 2),
-        "diem_A": round(A, 2),
-        "gp_low": gp_low,
-        "gp_high": gp_high,
-        "trong_vung": trong_vung,
-        "rsi": rsi_val,
-        "co_phan_ky": co_phan_ky,
-        "mo_ta_rsi": mo_ta_rsi,
-        "co_choch": co_choch,
-        "ly_do_choch": ly_do_choch,
-        "diem_confluence": diem,
-        "winrate": winrate,
-        "chat_luong": chat_luong,
-        "chi_tiet_confluence": chi_tiet,
-        "quan_ly": quan_ly,
-        "co_tin_hieu": co_tin_hieu,
+        "loi": None, "gia_hien_tai": gia_hien_tai,
+        "xu_huong_h1": xu_huong, "loai": loai,
+        "diem_X": round(X,2), "diem_A": round(A,2),
+        "gp_low": gp_low, "gp_high": gp_high,
+        "trong_vung": trong_vung, "rsi": rsi_val,
+        "co_phan_ky": co_phan_ky, "mo_ta_rsi": mo_ta_rsi,
+        "co_choch": co_choch, "ly_do_choch": ly_do_choch,
+        "diem_confluence": diem, "winrate": winrate,
+        "chat_luong": chat_luong, "chi_tiet_confluence": chi_tiet,
+        "quan_ly": quan_ly, "co_tin_hieu": co_tin_hieu,
         "trang_thai": ly_do_choch
     }
 
-    # 11. Gửi Telegram
     if co_tin_hieu and quan_ly:
         emoji    = "🟢" if loai == "BUY" else "🔴"
         noi_dung = f"""
 🦅 <b>{emoji} TÍN HIỆU {loai} — {san_pham}</b>
-{chat_luong} | Điểm: {diem}/5
+{chat_luong} | Điểm: {diem}/5 | Key: {_key_index[0]+1}/3
 
 📊 <b>H1:</b> {xu_huong}
 📐 <b>Golden Pocket:</b> {gp_low} – {gp_high}
