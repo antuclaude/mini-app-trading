@@ -59,8 +59,8 @@ def lay_du_lieu(san_pham):
         
         try:
             td     = TDClient(apikey=key)
-            df_m15 = td.time_series(symbol=symbol, interval="15min", outputsize=100).as_pandas()
-            df_h1  = td.time_series(symbol=symbol, interval="1h",    outputsize=50).as_pandas()
+            df_m15 = td.time_series(symbol=symbol, interval="15min", outputsize=60).as_pandas()
+            df_h1  = td.time_series(symbol=symbol, interval="1h",    outputsize=30).as_pandas()
 
             if df_m15 is None or df_m15.empty:
                 raise ValueError("df_m15 rỗng")
