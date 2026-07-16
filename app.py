@@ -73,7 +73,7 @@ def _background_scan():
             st.session_state['lan_cuoi_bg'] = datetime.now()
         except Exception as e:
             print(f"[Scanner] Lỗi: {e}")
-        time.sleep(300)  # 5 phút
+        time.sleep(2700)  # 45 phút
 
 def khoi_dong_scanner():
     global _scanner_started
